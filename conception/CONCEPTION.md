@@ -11,6 +11,8 @@ Le but principal est de réduire le temps nécessaire pour passer d'une idée à
 * Créer une expérience
 * Modifier une expérience
 * Lancer une expérience
+* Annuler une exécution
+* Déclarer les dépendances Python d'une expérience
 * Voir le statut d'une exécution
 * Consulter le résultat d'une exécution
 * Consulter l'historique des exécutions d'une expérience
@@ -31,10 +33,11 @@ Le but principal est de réduire le temps nécessaire pour passer d'une idée à
 
 L'utilisateur crée une expérience en définissant :
 
-* un nom ;
-* une description ;
-* un timeout ;
-* un script.
+* un nom obligatoire et non vide ;
+* une description optionnelle ;
+* un timeout optionnel, strictement positif lorsqu'il est renseigné ;
+* un script Python optionnel ;
+* zéro à plusieurs dépendances Python avec une contrainte de version optionnelle.
 
 L'expérience est ensuite sauvegardée et peut être exécutée plusieurs fois.
 
@@ -69,61 +72,77 @@ L'utilisateur peut lancer une nouvelle exécution à partir d'une expérience ex
 
 ### Experiment
 
-Rôle : stocke les informations principales de l'expérimentation
-Informations : nom, description, script, timeout
-Relations : exécution (peut avoir plusieurs exécutions en parallèle). L'historique d'une expérience correspond à l'ensemble de ses exécutions passées.
+Rôle : conserve la définition modifiable d'une expérimentation.
+
+Informations : nom, description, script Python, timeout et dépendances Python.
+
+Relations : une expérimentation possède zéro à plusieurs dépendances et exécutions. Plusieurs exécutions peuvent fonctionner simultanément, dans la limite configurée.
 
 ### Execution
 
-Rôle : exécute le script de l'expérimentation
-Informations : statut, temps (soit le temps en cours d'exécution, soit le temps total), résultat
-Relations : résultats (peut avoir un seul résultat). Une exécution terminée fait naturellement partie de l'historique de l'expérience.
+Rôle : représente une tentative d'exécution. Le Sandbox Manager réalise l'exécution du script.
 
-### Results
+Informations : statut, dates, timeout appliqué, code de sortie, message d'erreur et logs. La configuration utilisée doit être conservée indépendamment des modifications ultérieures de l'expérience.
 
-Rôle : représente la sortie du script (s'il y a une sortie)
-Informations : résultats (plusieurs sorties possibles), sous différents formats : tableau Markdown, HTML, numérique, alphanumérique
-Relations : les résultats sont rattachés à une exécution. Ils sont accessibles dans l'historique via l'exécution à laquelle ils appartiennent.
+Relations : une exécution appartient à une expérimentation et produit zéro à plusieurs résultats.
 
-### Statut d'execution
-Enumération : CREATED, RUNNING, SUCCESS, FAILED, TIMEOUT, CANCELLED
-Description des états : 
-CREATED : l’exécution a été créée mais n’a pas encore démarré.
-RUNNING : le script est en cours d’exécution.
-SUCCESS : l’exécution s’est terminée correctement.
-FAILED : l’exécution s’est terminée avec une erreur.
-TIMEOUT : l’exécution a dépassé le temps maximum autorisé.
-CANCELLED : l'exécution a été annulée par l'utilisateur.
+### Result
+
+Rôle : représente une sortie fonctionnelle explicitement produite par le script.
+
+Informations : nom, type (`TEXT`, `NUMBER`, `MARKDOWN`, `HTML`) et contenu. Un tableau peut être représenté en Markdown ou en HTML.
+
+Relations : chaque résultat appartient à une seule exécution. Les résultats sont consultables dans son historique.
+
+### Statut d'exécution
+
+| Statut | Signification |
+|---|---|
+| `CREATED` | Exécution enregistrée, en attente ou en préparation du conteneur. |
+| `RUNNING` | Le traitement dans le conteneur a commencé : installation des dépendances, puis script. |
+| `SUCCESS` | Traitement terminé sans erreur et résultats éventuels valides. |
+| `FAILED` | Erreur de préparation, d'installation, de script, de protocole ou interruption applicative. |
+| `TIMEOUT` | Durée maximale du traitement atteinte et arrêt confirmé. |
+| `CANCELLED` | Annulation acceptée et arrêt confirmé, ou annulation avant tout démarrage. |
 
 ## Cycle de vie d'une exécution
-```
-CREATED ───────────────> CANCELLED
-│
-v
-RUNNING ───────────────> CANCELLED
-├──> SUCCESS
-├──> FAILED
-└──> TIMEOUT
-```
+
+| État initial | États suivants autorisés |
+|---|---|
+| `CREATED` | `RUNNING`, `FAILED`, `CANCELLED` |
+| `RUNNING` | `SUCCESS`, `FAILED`, `TIMEOUT`, `CANCELLED` |
+| État final | Aucun |
+
+L'échec de création ou de démarrage du conteneur autorise notamment `CREATED → FAILED`.
+
 ## Règles métier
 
-### Experiment : 
-On peut créer une expérimentation avec un nom, sans description, sans script, sans timeout.
+### Experiment
 
-### Execution : 
-On peut lancer une execution avec une experimentation sans script. (on retourne SUCCESS mais sans résultat)
-Si il n'y a pas de timeout, on bloque à 10 minutes l'exécution et on retourne TIMEOUT.
+Une expérimentation peut être créée avec seulement un nom non vide. La description, le script et le timeout sont optionnels.
 
-### Statut : 
-On part de CREATED->RUNNING, si on annule l'execution elle passe à CANCELLED. etc.
-A partir du moment ou l'execution est en cours, elle ne repasse jamais à CREATED. Après RUNNING, l'execution ne peut que être dans l'état SUCCESS ou FAILED OU TIMEOUT OU CANCELLED.
+### Execution
 
-Le TIMEOUT et CANCELLED force l'arrêt du script (et du sandbox).
+Un script absent ou vide est traité comme un script sans opération. L'exécution suit le cycle normal et réussit sans résultat si la préparation et l'installation des dépendances réussissent.
 
-### Results : 
-Une exécution FAILED renvoit un resultat avec le message d'erreur complet.
-Une execution Timeout renvoit un resultat générique Timeout et le message d'erreur si il y a.
-Une execution Cancelled ne renvoit rien.
+Le timeout doit être strictement positif. S'il est absent, la limite appliquée est de 600 secondes. Une exécution terminée avant cette limite peut réussir normalement.
+
+Le timeout commence à `started_at`, au démarrage du traitement dans le conteneur, et inclut l'installation pip et le script. L'attente dans la file est exclue. La préparation Docker dispose d'un délai technique distinct et configurable ; son dépassement produit `FAILED`.
+
+### Statuts et arrêt
+
+Les transitions sont contrôlées de manière atomique afin qu'une fin normale, un timeout et une annulation concurrents ne puissent pas écraser leurs décisions respectives. Une fois enregistré, un état final ne change plus.
+
+Une annulation acceptée ou un timeout doit empêcher tout nouveau démarrage et provoquer l'arrêt du traitement actif. Le code de sortie provoqué par cet arrêt ne doit pas remplacer la cause retenue par `FAILED`.
+
+### Résultats et diagnostics
+
+* `SUCCESS` : zéro à plusieurs résultats valides.
+* `FAILED` : message d'erreur et logs disponibles ; les résultats valides déjà produits peuvent être conservés.
+* `TIMEOUT` : message indiquant le dépassement, logs disponibles et éventuels résultats valides déjà produits.
+* `CANCELLED` : aucun résultat fonctionnel conservé ; les logs disponibles restent accessibles.
+
+Les messages d'erreur et les logs appartiennent à l'exécution et ne sont pas des `Result`.
 
 ## Architecture
 
@@ -156,62 +175,36 @@ Conserver durablement les expérimentations, les exécutions, leurs statuts, leu
 ## Flux principal d'une exécution
 
 1. L'utilisateur demande le lancement d'une expérience.
+2. Le Backend valide l'expérience et sa configuration.
+3. Il enregistre une `Execution` en `CREATED`, son timeout effectif et une copie de la configuration utilisée.
+4. Après validation de la transaction, le traitement est confié au mécanisme asynchrone. La réponse HTTP n'attend pas la fin de l'exécution.
+5. Lorsqu'une place est disponible, le Sandbox Manager prépare un conteneur dédié et lui fournit le script et les dépendances.
+6. Au démarrage du traitement dans le conteneur, l'exécution passe à `RUNNING` et `started_at` est enregistré.
+7. Le conteneur installe les dépendances avec pip, puis lance le script si l'installation réussit.
+8. Le système surveille la fin du traitement, le timeout et les demandes d'annulation.
+9. Si nécessaire, il force l'arrêt et en vérifie l'effectivité.
+10. Il récupère le code de sortie, les logs et les résultats disponibles, puis valide le protocole de résultats.
+11. Il sauvegarde l'état final, `finished_at`, les diagnostics et les résultats autorisés dans une transaction.
+12. Après sauvegarde, le Sandbox Manager supprime le conteneur et ses fichiers temporaires.
+13. L'utilisateur consulte le statut, les résultats et les diagnostics.
 
-2. Le Backend vérifie que l'expérience existe et que les informations nécessaires à son exécution sont valides.
+Une erreur de nettoyage ne modifie pas un état final déjà enregistré : elle est journalisée et le nettoyage est retenté. Si la sauvegarde échoue, le conteneur doit être arrêté ; les données disponibles sont conservées pour permettre la reprise avant suppression.
 
-3. Le Backend crée une nouvelle exécution avec le statut `CREATED`.
+## Décisions restant à préciser
 
-4. Le Backend demande au Sandbox Manager de préparer un environnement isolé pour cette exécution.
+Les choix déjà actés sont Docker, un Sandbox Manager interne au monolithe, Python pour la V1 et des appels Java entre modules.
 
-5. Le Sandbox Manager crée et démarre le sandbox.
+Les points suivants restent à trancher lors de l'implémentation :
 
-6. Lorsque le sandbox est prêt, l'exécution passe au statut `RUNNING`.
+* client Java utilisé pour communiquer avec Docker ;
+* transfert du script et des dépendances, emplacement du fichier de résultats et schéma JSON exact ;
+* valeurs par défaut des limites CPU, RAM, processus, disque, logs et résultats ;
+* délai technique de préparation et taille de la file d'attente ;
+* politique réseau pour pip et pour le script, notamment pour une exécution sans Internet ;
+* mécanisme de protection du rendu HTML et Markdown ;
+* représentation de la configuration historique, des versions Python et des packages effectivement installés.
 
-7. Le script de l'expérience est exécuté dans le sandbox.
-
-8. Pendant l'exécution, le système surveille :
-
-    * l'état du script ;
-    * le timeout ;
-    * une éventuelle demande d'annulation.
-
-9. À la fin de l'exécution :
-
-    * si le script se termine normalement, le statut passe à `SUCCESS` ;
-    * si le script retourne une erreur, le statut passe à `FAILED` ;
-    * si le timeout est atteint, le statut passe à `TIMEOUT` et le script est arrêté ;
-    * si l'utilisateur annule l'exécution, le statut passe à `CANCELLED` et le script est arrêté.
-
-10. Les résultats disponibles sont récupérés et associés à l'exécution.
-
-11. Le Sandbox Manager arrête et détruit le sandbox.
-
-12. Le Backend sauvegarde l'état final de l'exécution ainsi que ses résultats.
-
-13. L'utilisateur peut consulter le statut final, les résultats et les éventuelles erreurs depuis l'interface.
-
-## Questions ouvertes
-
-* Quelle technologie utiliser pour implémenter les sandboxes ?
-* Comment le Backend communique-t-il avec le Sandbox Manager ?
-* Le Sandbox Manager fait-il partie du Backend ou doit-il être un service séparé ?
-* Quels langages de script seront supportés dans la V1 ?
-* Comment fournir le script et ses éventuels fichiers au sandbox ?
-* Comment installer ou déclarer les dépendances nécessaires à une expérimentation ?
-* Comment récupérer les sorties produites par le script ?
-* Quel format utiliser pour représenter plusieurs types de résultats : texte, nombre, Markdown, HTML, fichier, tableau, etc. ?
-* Comment récupérer et conserver les logs `stdout` et `stderr` ?
-* Comment détecter qu'une exécution est terminée ou qu'elle a échoué ?
-* Comment forcer l'arrêt d'une exécution lors d'un `TIMEOUT` ou d'une annulation ?
-* Quelles limites imposer à un sandbox : CPU, RAM, GPU, disque, réseau ?
-* Le réseau doit-il être accessible depuis un sandbox par défaut ?
-* Comment permettre à une expérimentation d'utiliser le GPU sans compromettre l'isolation ?
-* Comment gérer plusieurs exécutions simultanées ?
-* Que se passe-t-il si l'application s'arrête pendant qu'une expérimentation est en cours ?
-* Faut-il conserver le sandbox après une erreur pour permettre le diagnostic, ou toujours le supprimer ?
-* Quels fichiers produits par une exécution doivent être conservés après la destruction du sandbox ?
-* Comment réexécuter exactement une ancienne exécution avec la même configuration ?
-* Quelles informations faut-il conserver pour garantir la reproductibilité d'une expérimentation ?
+La gestion avancée du GPU, les fichiers arbitraires comme résultats et la réexécution strictement reproductible restent des extensions à cadrer.
 
 # Conception technique
 ## 1. Stack technique
@@ -229,6 +222,7 @@ Conserver durablement les expérimentations, les exécutions, leurs statuts, leu
 
 ### Base de données
 - PostgreSQL
+- Flyway pour les migrations du schéma
 
 ### Sandboxing
 - Docker
@@ -281,31 +275,19 @@ Responsable de la récupération et de la conservation des résultats produits p
 Responsable de la persistance des expérimentations, exécutions et résultats dans PostgreSQL.
 
 ### Vue générale
-```
-Frontend Thymeleaf / HTMX
-|
-v
-Spring Boot
-|
-+-- Experiment
-|
-+-- Execution
-|      |
-|      v
-|  Sandbox Manager
-|      |
-|      v
-|    Docker
-|
-+-- Result
-|
-+-- Persistence
-|
-v
-PostgreSQL
-```
 
-## 3. Modèle de données
+```mermaid
+flowchart TD
+    Web["Thymeleaf et HTMX"] --> Experiment
+    Web --> Execution
+    Experiment --> Persistence
+    Execution --> Sandbox["Sandbox Manager"]
+    Sandbox --> Docker
+    Execution --> Result
+    Result --> Persistence
+    Execution --> Persistence
+    Persistence --> PostgreSQL
+```
 
 ## 3. Modèle de données
 
@@ -325,7 +307,7 @@ Champs :
 
 Contraintes :
 
-* `name` obligatoire
+* `name` obligatoire et non vide
 * `description` optionnelle
 * `script` optionnel
 * si `timeout_seconds` est absent, la valeur par défaut appliquée lors de l'exécution est de 600 secondes
@@ -362,7 +344,7 @@ Contraintes :
 
 * `package_name` obligatoire
 * `version_constraint` optionnelle
-* deux dépendances identiques ne doivent pas être déclarées plusieurs fois pour la même expérimentation
+* un même `package_name` ne peut apparaître qu'une fois par expérimentation, conformément à la contrainte SQL `(experiment_id, package_name)` ; la normalisation des noms doit être appliquée avant sauvegarde
 
 ---
 
@@ -380,6 +362,9 @@ Champs :
 * `finished_at` : date de fin
 * `timeout_seconds` : timeout réellement utilisé pour cette exécution
 * `error_message` : message d'erreur éventuel
+* `exit_code` : code de sortie, optionnel si aucun processus n'a démarré
+* `stdout_log` : sortie standard disponible
+* `stderr_log` : sortie d'erreur disponible
 
 Valeurs possibles pour `status` :
 
@@ -395,7 +380,23 @@ Relations :
 * une `Experiment` possède plusieurs `Execution`
 * une `Execution` appartient à une seule `Experiment`
 
-Le timeout est copié dans l'exécution au moment de son lancement afin de conserver la configuration réellement utilisée.
+Le timeout effectif est copié au lancement et ne change plus pour cette exécution. `started_at` reste absent si le traitement n'a pas démarré. `finished_at` est renseigné pour tout état final.
+
+### Configuration historique : évolution du schéma à prévoir
+
+La migration actuelle `V1__create_initial_schema.sql` contient les quatre tables décrites ici, avec les logs et le code de sortie. Elle ne contient pas encore de snapshot du script ni des dépendances.
+
+Avant de s'appuyer sur l'historique pour retrouver la configuration exécutée, une nouvelle migration devra prévoir :
+
+* une copie du script dans `execution`, par exemple `script_snapshot` ;
+* une copie des dépendances déclarées, par exemple dans une table `execution_dependency` liée à `execution` ;
+* l'identification de l'image utilisée et, si disponibles, les versions Python et packages effectivement installés.
+
+Le lancement doit lire une configuration cohérente et en conserver la copie avant de confier l'exécution au worker. Une modification ultérieure de l'expérience ne doit pas changer cette copie.
+
+Ces évolutions sont prévues dans la conception, mais ne sont pas présentes dans le SQL actuel. Une migration déjà appliquée doit être complétée par une nouvelle migration.
+
+La conservation des contraintes pip ne garantit pas une reproduction exacte : les dépendances transitives, les images, les données externes et l'aléatoire peuvent changer.
 
 ---
 
@@ -428,41 +429,15 @@ Relations :
 
 ### Relations
 
-```text
-Experiment
-    1
-    |
-    | N
-    +------> ExperimentDependency
+| Parent | Enfant | Cardinalité |
+|---|---|---|
+| `Experiment` | `ExperimentDependency` | Une expérience possède zéro à plusieurs dépendances. |
+| `Experiment` | `Execution` | Une expérience possède zéro à plusieurs exécutions. |
+| `Execution` | `Result` | Une exécution produit zéro à plusieurs résultats. |
 
-    1
-    |
-    | N
-    v
-Execution
-    1
-    |
-    | N
-    v
-Result
-```
+Chaque enfant référence exactement un parent. La future table de snapshots des dépendances référencera `Execution`.
 
-
-### Relations
-
-```text
-Experiment
-    1
-    |
-    | N
-    v
-Execution
-    1
-    |
-    | N
-    v
-Result
-```
+Dans la migration actuelle, les clés étrangères utilisent `ON DELETE CASCADE` : supprimer une expérience supprimerait aussi ses dépendances, ses exécutions et leurs résultats. La suppression d'une expérience n'est pas proposée dans le périmètre V1.
 
 ### Historique
 
@@ -474,15 +449,13 @@ L'historique d'une expérimentation correspond simplement à l'ensemble de ses e
 
 La durée n'est pas stockée directement.
 
-Elle est calculée à partir de :
+| Situation | Durée affichée |
+|---|---|
+| Traitement en cours | Date actuelle moins `started_at`. |
+| Traitement terminé après démarrage | `finished_at - started_at`. |
+| Traitement jamais démarré | Non applicable. |
 
-```text
-RUNNING
-date actuelle - started_at
-
-TERMINÉE
-finished_at - started_at
-```
+Le temps d'attente et de préparation est distinct du temps de traitement. `updated_at` doit être actualisé à chaque modification d'une expérience : sa valeur SQL par défaut ne le met pas automatiquement à jour.
 
 ## 4. API et échanges entre composants
 
@@ -542,16 +515,9 @@ Les exécutions sont traitées de manière asynchrone afin qu'une requête HTTP 
 
 ### Lancement
 
-Lorsqu'un utilisateur lance une expérimentation :
+Le lancement suit le flux principal défini plus haut. Le worker ne démarre qu'après validation de la transaction qui crée l'exécution.
 
-1. Le Backend valide la demande.
-2. Une `Execution` est créée avec le statut `CREATED`.
-3. La requête utilisateur se termine sans attendre la fin de l'exécution.
-4. L'exécution est transmise au mécanisme d'exécution asynchrone.
-5. Le Sandbox Manager prépare le sandbox.
-6. Lorsque le sandbox est prêt, l'exécution passe à `RUNNING`.
-7. Le script est exécuté.
-8. Le résultat final détermine le statut de l'exécution.
+Une erreur de soumission au worker doit être prise en charge : l'exécution ne doit pas rester bloquée en `CREATED`. La V1 doit également distinguer une exécution en attente normale d'une exécution abandonnée après redémarrage.
 
 ### États finaux
 
@@ -562,7 +528,7 @@ Une exécution peut terminer avec :
 * `TIMEOUT`
 * `CANCELLED`
 
-Un état final ne peut plus revenir à `RUNNING` ou `CREATED`.
+Un état final est immuable, y compris vis-à-vis des autres états finaux.
 
 ### Exécutions simultanées
 
@@ -574,26 +540,21 @@ La valeur exacte de cette limite sera configurable.
 
 ### Annulation
 
-Lorsqu'une annulation est demandée :
+1. Le système vérifie et réserve atomiquement la demande si aucun état final ni autre cause d'arrêt n'a déjà été retenu.
+2. Il empêche le worker de démarrer un traitement annulé en attente.
+3. Si un conteneur existe, il l'arrête et confirme son arrêt.
+4. Il récupère les logs disponibles, enregistre `CANCELLED` et `finished_at`, sans résultat fonctionnel.
+5. Il supprime le conteneur après sauvegarde.
 
-1. le système vérifie que l'exécution peut encore être annulée ;
-2. le Sandbox Manager arrête le sandbox ;
-3. l'exécution passe à `CANCELLED` ;
-4. le sandbox est supprimé.
+Une demande répétée est sans effet supplémentaire. Si Docker est inaccessible, le système conserve la demande et retente l'arrêt ; il ne présente pas l'arrêt comme confirmé.
 
 ### Timeout
 
-Le timeout utilisé est celui enregistré dans l'`Execution`.
+Le timeout enregistré dans `Execution` inclut l'installation pip et le script, à partir de `started_at`. La valeur par défaut est de 600 secondes.
 
-Si aucun timeout n'a été défini dans l'expérimentation, une valeur de 600 secondes est utilisée.
+À l'échéance, le système réserve la cause `TIMEOUT`, arrête le traitement, vérifie l'arrêt, récupère les sorties disponibles et sauvegarde le statut final avant de supprimer le conteneur.
 
-Lorsque le timeout est atteint :
-
-1. le script est interrompu ;
-2. le sandbox est arrêté ;
-3. l'exécution passe à `TIMEOUT` ;
-4. les informations disponibles sont récupérées ;
-5. le sandbox est supprimé.
+La surveillance doit rester active pendant l'installation des dépendances. Une erreur pip avant l'échéance donne `FAILED` et empêche le lancement du script.
 
 ---
 
@@ -605,21 +566,7 @@ Chaque exécution dispose de son propre environnement isolé.
 
 Dans la V1, les sandboxes sont implémentés avec Docker.
 
-```text
-Execution
-    |
-    v
-Sandbox Manager
-    |
-    v
-Docker
-    |
-    v
-Container
-    |
-    v
-Script
-```
+Le module `Execution` sollicite le Sandbox Manager, qui pilote Docker pour exécuter le script dans un conteneur dédié.
 
 ### Cycle de vie
 
@@ -630,9 +577,9 @@ Pour chaque exécution, le Sandbox Manager :
 3. fournit le script au conteneur ;
 4. démarre le conteneur ;
 5. surveille son exécution ;
-6. récupère les sorties nécessaires ;
-7. arrête le conteneur si nécessaire ;
-8. supprime le conteneur.
+6. confirme la fin du traitement ou arrête le conteneur si nécessaire ;
+7. récupère les sorties et attend leur sauvegarde avec l'état final ;
+8. supprime le conteneur et les fichiers temporaires.
 
 ### Identification
 
@@ -644,7 +591,7 @@ L'identifiant de l'exécution pourra être utilisé dans les métadonnées ou la
 
 La V1 commence avec un nombre limité d'environnements supportés.
 
-Le premier environnement peut être basé sur Python afin de permettre l'exécution de scripts liés à l'IA.
+La V1 utilise un environnement Python pour exécuter les scripts et installer leurs dépendances avec pip.
 
 Les images disponibles sont contrôlées par l'application.
 
@@ -659,6 +606,12 @@ Les sandboxes doivent pouvoir être limités en :
 * durée d'exécution.
 
 La gestion avancée du GPU n'est pas nécessaire pour la première version.
+
+### Dépendances Python
+
+Le Backend construit une liste de dépendances à partir des noms et contraintes validés. L'installation pip s'effectue dans le conteneur dédié, jamais dans l'environnement Spring Boot ou sur l'hôte. Les logs d'installation sont conservés avec ceux de l'exécution.
+
+Le script n'est lancé que si l'installation réussit. L'accès aux index de packages doit être compatible avec la politique réseau choisie : un traitement sans réseau nécessite des dépendances déjà disponibles dans l'image ou dans un cache contrôlé. Les détails de ce mécanisme restent à définir.
 
 ### Nettoyage
 
@@ -712,7 +665,7 @@ Exemple conceptuel :
 }
 ```
 
-Le format exact sera défini pendant l'implémentation du protocole d'exécution.
+Le format exact et son canal de transfert seront définis pendant l'implémentation. Les logs doivent rester distincts du document de résultats. Une absence de résultats est autorisée ; un document présent mais invalide produit `FAILED`, même si le processus retourne zéro. Les erreurs de protocole sont enregistrées dans les diagnostics.
 
 ### Logs
 
@@ -761,19 +714,27 @@ Si le sandbox ne peut pas être créé ou démarré :
 
 ### Erreur de l'application
 
-Une exécution ne doit pas rester indéfiniment dans l'état `RUNNING` si l'application est interrompue.
+Au démarrage, avant d'accepter de nouveaux traitements, l'application rapproche les exécutions enregistrées des conteneurs identifiés par ses propres labels.
 
-Au démarrage de l'application, un mécanisme de récupération vérifie les exécutions `CREATED` et `RUNNING`.
+| Situation | Comportement attendu |
+|---|---|
+| `CREATED` sans conteneur après redémarrage | Marquer `FAILED` avec un diagnostic d'interruption ; pas de relance automatique en V1. |
+| `RUNNING` sans conteneur | Marquer `FAILED` et renseigner la date de constat de l'interruption. |
+| Conteneur terminé, exécution non finale | Récupérer les sorties et finaliser selon le code de sortie, le protocole et la cause d'arrêt connue. |
+| Conteneur encore actif | Rétablir la surveillance et appliquer le timeout depuis le `started_at` d'origine ; arrêter immédiatement si l'échéance est dépassée. |
+| Exécution finale avec conteneur restant | Confirmer son arrêt et terminer le nettoyage. |
+| Conteneur de l'application sans exécution associée | L'arrêter puis le supprimer. |
+| Docker inaccessible | Journaliser et retenter la réconciliation ; ne pas confondre une erreur d'accès avec un conteneur absent. |
 
-Le système compare leur état avec les sandboxes réellement présents.
+Les demandes d'arrêt acceptées doivent pouvoir être retrouvées après redémarrage ; leur représentation persistante reste à ajouter au schéma. Un conteneur actif dont la configuration de surveillance ne peut pas être retrouvée doit être arrêté et l'exécution marquée `FAILED` après confirmation.
 
-Une exécution dont le sandbox n'existe plus est considérée comme interrompue et passe à `FAILED`.
+La reprise utilise les mêmes règles de sauvegarde avant suppression que le flux normal.
 
 ### Retry
 
 La V1 ne relance pas automatiquement une exécution échouée.
 
-L'utilisateur peut manuellement réexécuter l'expérimentation, ce qui crée une nouvelle `Execution`.
+L'utilisateur peut manuellement réexécuter l'expérimentation avec sa configuration actuelle, ce qui crée une nouvelle `Execution`. Rejouer exactement une ancienne configuration est une fonctionnalité distincte, non garantie par la V1.
 
 L'ancienne exécution reste conservée dans l'historique.
 
@@ -871,27 +832,7 @@ Scénarios minimum :
 
 Un test de bout en bout doit couvrir le scénario principal :
 
-```text
-Création Experiment
-        |
-        v
-Lancement Execution
-        |
-        v
-Création Sandbox
-        |
-        v
-Exécution Script
-        |
-        v
-Récupération Result
-        |
-        v
-SUCCESS
-        |
-        v
-Consultation Result
-```
+Créer une expérience, lancer une exécution, exécuter le script dans un conteneur, sauvegarder les résultats avec le statut `SUCCESS`, nettoyer le conteneur puis consulter les résultats.
 
 ### Tests de nettoyage
 
@@ -911,4 +852,11 @@ Les cas suivants doivent également être couverts :
 * script retournant plusieurs résultats ;
 * résultat invalide ;
 * erreur Docker ;
-* plusieurs exécutions simultanées.
+* plusieurs exécutions simultanées ;
+* échec et timeout pendant l'installation pip ;
+* annulation avant démarrage et pendant la préparation ;
+* concurrence entre fin normale, timeout et annulation ;
+* reprise après interruption applicative ;
+* échec de sauvegarde ou de nettoyage ;
+* modification d'une expérience après lancement, sans modification de sa configuration copiée.
+
